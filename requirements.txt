@@ -1,0 +1,14 @@
+# VEGA runtime dependencies (Python 3.10, CUDA 12.2 driver environment)
+# Install torch/vision/audio CUDA wheels with:
+# pip install torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu121
+
+torch==2.4.1
+torchvision==0.19.1
+torchaudio==2.4.1
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.5.1
+tqdm==4.66.5
+transformers==4.44.2
+pillow==10.4.0
+pytz==2024.1
