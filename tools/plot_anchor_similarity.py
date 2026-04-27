@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -13,10 +14,22 @@ import torch.nn.functional as F
 from sklearn.manifold import TSNE
 from tqdm import tqdm
 
+# Ensure repository root is importable when running as: python tools/plot_anchor_similarity.py
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from configs.iemocap_config import IEMOCAP_CONFIG
 from main import create_model, setup_data_and_loss
 from vega_utils.anchor_utils import get_anchors
 from vega_utils.common import emotion_labels, seed_everything
+
+
+def resolve_path(path_str: str) -> Path:
+    path = Path(path_str).expanduser()
+    if path.is_absolute():
+        return path
+    return REPO_ROOT / path
 
 
 def build_args(cli_args: argparse.Namespace) -> argparse.Namespace:
@@ -156,11 +169,14 @@ def main() -> None:
     args = build_args(cli_args)
     _, test_loader, _, _ = setup_data_and_loss(args)
     model = create_model(args)
-    load_checkpoint(model, Path(cli_args.checkpoint))
+    ckpt_path = resolve_path(cli_args.checkpoint)
+    out_png_path = resolve_path(cli_args.output_png)
+
+    load_checkpoint(model, ckpt_path)
     anchor_dict = get_anchors(args)
     features, labels, anchor_center = extract_clip_space_features(args, model, test_loader, anchor_dict)
-    plot_tsne(features, labels, anchor_center, cli_args.dataset, Path(cli_args.output_png))
-    print(f"[plot] figure saved: {cli_args.output_png}")
+    plot_tsne(features, labels, anchor_center, cli_args.dataset, out_png_path)
+    print(f"[plot] figure saved: {out_png_path}")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,15 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def resolve_path(path_str: str) -> Path:
+    path = Path(path_str).expanduser()
+    if path.is_absolute():
+        return path
+    return REPO_ROOT / path
+
 
 EXPERIMENT_DISPLAY = {
     "full_vega": "Full VEGA Model",
@@ -177,8 +186,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    metrics_path = Path(args.metrics_csv)
-    out_dir = Path(args.out_dir)
+    metrics_path = resolve_path(args.metrics_csv)
+    out_dir = resolve_path(args.out_dir)
     data = load_metrics_csv(metrics_path)
     ablation_rows = build_ablation_rows(data)
 
@@ -190,7 +199,7 @@ def main() -> None:
     print(f"[table] Ablation LaTeX   : {abl_tex_path}")
 
     if "full_vega" in data:
-        baseline_path = Path(args.baseline_json) if args.baseline_json else None
+        baseline_path = resolve_path(args.baseline_json) if args.baseline_json else None
         baselines = load_baseline_json(baseline_path)
         cmp_rows = build_comparison_rows(data["full_vega"], baselines)
         cmp_md = comparison_markdown(cmp_rows, args.dataset)

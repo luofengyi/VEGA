@@ -11,6 +11,15 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def resolve_path(path_str: str) -> Path:
+    path = Path(path_str).expanduser()
+    if path.is_absolute():
+        return path
+    return REPO_ROOT / path
+
 
 BEST_METRIC_RE = re.compile(r"^(all_acc|all_f1|a_f1|v_f1|t_f1):\s*([0-9.]+),\s*idx:\s*([0-9]+)\s*$")
 FINAL_F1_RE = re.compile(r"Best CLS F1:\s*([0-9.]+)")
@@ -70,14 +79,14 @@ def main() -> None:
     parser.add_argument("--out_json", required=True, help="Path to output JSON file.")
     args = parser.parse_args()
 
-    log_dir = Path(args.log_dir)
+    log_dir = resolve_path(args.log_dir)
     logs = sorted(log_dir.glob("*.log"))
     if not logs:
         raise FileNotFoundError(f"No log files found in: {log_dir}")
 
     results = [parse_log(log_file) for log_file in logs]
 
-    out_csv = Path(args.out_csv)
+    out_csv = resolve_path(args.out_csv)
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     with out_csv.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(asdict(results[0]).keys()))
@@ -85,7 +94,7 @@ def main() -> None:
         for row in results:
             writer.writerow(asdict(row))
 
-    out_json = Path(args.out_json)
+    out_json = resolve_path(args.out_json)
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(
         json.dumps([asdict(r) for r in results], ensure_ascii=False, indent=2),
