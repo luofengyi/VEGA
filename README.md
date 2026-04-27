@@ -115,33 +115,6 @@ python run.py --Dataset IEMOCAP --CLIP_Model openai/clip-vit-base-patch32 --cls_
 python inference.py --checkpoint "checkpoint/IEMOCAP.pth"
 ```
 
-## Conda One-Click Train/Infer (Linux Bash, CUDA 12.2) ⚡
-
-We provide Bash helpers for a reproducible Conda workflow:
-
-- `setup_cuda122_env.sh`: create/update conda env and install dependencies
-- `run_train.sh`: launch training with pre-run file checks
-- `run_infer.sh`: launch inference with pre-run file checks
-
-```bash
-# Optional: make scripts executable (first time only)
-chmod +x setup_cuda122_env.sh run_train.sh run_infer.sh
-
-# 1) Create conda environment and install dependencies
-CONDA_ENV_NAME=vega-cu122 ./setup_cuda122_env.sh
-
-# 2) One-click training
-CONDA_ENV_NAME=vega-cu122 ./run_train.sh
-
-# 3) One-click inference
-CONDA_ENV_NAME=vega-cu122 CHECKPOINT=checkpoint/IEMOCAP.pth ./run_infer.sh
-```
-
-Notes:
-- Default env name is `vega-cu122`; customize with env var `CONDA_ENV_NAME`.
-- These scripts are designed for Linux Bash and do not rely on PowerShell/venv.
-- Please ensure required data/anchor/checkpoint files are placed before running.
-
 ## Citation 📚
 
 ```bibtex
