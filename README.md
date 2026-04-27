@@ -115,6 +115,30 @@ python run.py --Dataset IEMOCAP --CLIP_Model openai/clip-vit-base-patch32 --cls_
 python inference.py --checkpoint "checkpoint/IEMOCAP.pth"
 ```
 
+## Conda One-Click Train/Infer (CUDA 12.2) ⚡
+
+We provide PowerShell helpers for a reproducible Conda workflow:
+
+- `setup_cuda122_env.ps1`: create/update Conda env and install dependencies
+- `run_train.ps1`: launch training with pre-run file checks
+- `run_infer.ps1`: launch inference with pre-run file checks
+
+```powershell
+# 1) Create Conda environment and install dependencies
+.\setup_cuda122_env.ps1 -CondaEnvName vega-cu122
+
+# 2) One-click training
+.\run_train.ps1 -CondaEnvName vega-cu122
+
+# 3) One-click inference
+.\run_infer.ps1 -CondaEnvName vega-cu122 -Checkpoint "checkpoint/IEMOCAP.pth"
+```
+
+Notes:
+- Default env name is `vega-cu122`; customize with `-CondaEnvName`.
+- These scripts do not use `venv`.
+- Please ensure required data/anchor/checkpoint files are placed before running.
+
 ## Citation 📚
 
 ```bibtex
