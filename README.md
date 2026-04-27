@@ -115,6 +115,56 @@ python run.py --Dataset IEMOCAP --CLIP_Model openai/clip-vit-base-patch32 --cls_
 python inference.py --checkpoint "checkpoint/IEMOCAP.pth"
 ```
 
+## One-Click Paper Experiments (Main + Ablations) 🧪
+
+Run the full VEGA setting plus five ablations, then auto-export metrics and visualization:
+
+```bash
+chmod +x run_paper_experiments.sh
+CONDA_ENV_NAME=vega-cu122 DATASET=IEMOCAP ./run_paper_experiments.sh
+```
+
+Generated artifacts:
+- Logs: `output/paper_suite/logs/*.log`
+- Metrics table: `output/paper_suite/summary/metrics.csv`
+- Metrics json: `output/paper_suite/summary/metrics.json`
+- Visualization figure: `output/paper_suite/figures/anchor_similarity_tsne.png`
+- Paper-ready tables (Markdown/LaTeX): `output/paper_suite/tables/*.md` and `*.tex`
+
+Notes:
+- Set `DATASET=MELD` to run on MELD.
+- Override visualization checkpoint via `VIS_CHECKPOINT=checkpoint/IEMOCAP.pth`.
+- Disable figure generation via `RUN_VIS=0`.
+
+### Generate Paper Tables
+
+```bash
+python tools/make_table.py \
+  --metrics_csv output/paper_suite/summary/metrics.csv \
+  --dataset IEMOCAP \
+  --out_dir output/paper_suite/tables
+```
+
+Optional SOTA baselines can be injected via JSON:
+
+```bash
+python tools/make_table.py \
+  --metrics_csv output/paper_suite/summary/metrics.csv \
+  --dataset IEMOCAP \
+  --out_dir output/paper_suite/tables \
+  --baseline_json baseline_iemocap.json
+```
+
+`baseline_iemocap.json` example:
+
+```json
+[
+  {"model": "SDT", "acc": 70.12, "wf1": 70.05},
+  {"model": "M3Net", "acc": 69.40, "wf1": 69.32},
+  {"model": "EmoBERTa", "acc": 68.19, "wf1": 68.10}
+]
+```
+
 ## Citation 📚
 
 ```bibtex
