@@ -3,7 +3,6 @@ set -euo pipefail
 
 PYTHON_EXE="python"
 DATASET="IEMOCAP"
-CLIP_MODEL="openai/clip-vit-base-patch32"
 SEED=24
 EPOCHS=0
 BATCH_SIZE=0
@@ -16,8 +15,6 @@ while [[ $# -gt 0 ]]; do
       PYTHON_EXE="$2"; shift 2 ;;
     --dataset)
       DATASET="$2"; shift 2 ;;
-    --clip-model)
-      CLIP_MODEL="$2"; shift 2 ;;
     --seed)
       SEED="$2"; shift 2 ;;
     --epochs)
@@ -35,7 +32,6 @@ Usage: tools/run_ablation_graph.sh [options]
 Options:
   --python-exe <path>     Python executable (default: python)
   --dataset <name>        Dataset name (default: IEMOCAP)
-  --clip-model <name>     CLIP model (default: openai/clip-vit-base-patch32)
   --seed <int>            Random seed (default: 24)
   --epochs <int>          Override epochs when >0 (default: 0, keep config)
   --batch-size <int>      Override batch size when >0 (default: 0, keep config)
@@ -55,7 +51,7 @@ log_dir="output/ablation_logs/${timestamp}"
 mkdir -p "${log_dir}"
 summary_csv="${log_dir}/summary.csv"
 
-echo "Ablation suite: Baseline / +Graph / +Graph+CLIP"
+echo "Ablation suite: Baseline / +SimpleGraph / +PyG(noCL) / +PyG(CL)"
 echo "Dataset: ${DATASET} | Seed: ${SEED} | DryRun: ${DRY_RUN} | StopOnError: ${STOP_ON_ERROR}"
 
 echo "experiment,status,exit_code,best_cls_f1,duration_sec,log_path,command,started_at,finished_at" > "${summary_csv}"
@@ -121,12 +117,18 @@ run_experiment() {
 run_experiment "Baseline" "${log_dir}/baseline.log" \
   --name ablation_baseline --cls_loss --no_clip_loss --no_use_graph_agg
 
-run_experiment "+Graph" "${log_dir}/graph.log" \
-  --name ablation_graph --cls_loss --no_clip_loss --use_graph_agg --graph_wp 8 --graph_wf 8 --graph_drop 0.1
+run_experiment "+SimpleGraph" "${log_dir}/simple_graph.log" \
+  --name ablation_simple_graph --cls_loss --no_clip_loss --use_graph_agg --no_use_pyg_graph_agg \
+  --graph_wp 8 --graph_wf 8 --graph_drop 0.1
 
-run_experiment "+Graph+CLIP" "${log_dir}/graph_clip.log" \
-  --name ablation_graph_clip --cls_loss --clip_loss --clip_all_clip_kl_loss --cls_all_cls_kl_loss \
-  --use_graph_agg --graph_wp 8 --graph_wf 8 --graph_drop 0.1 --CLIP_Model "${CLIP_MODEL}"
+run_experiment "+PyG(noGraphCL)" "${log_dir}/pyg_no_cl.log" \
+  --name ablation_pyg_no_cl --cls_loss --no_clip_loss --use_graph_agg --use_pyg_graph_agg \
+  --no_graph_cl_loss --disable_graph_cl --graph_wp 8 --graph_wf 8 --graph_drop 0.1
+
+run_experiment "+PyG(GraphCL)" "${log_dir}/pyg_graph_cl.log" \
+  --name ablation_pyg_graph_cl --cls_loss --no_clip_loss --use_graph_agg --use_pyg_graph_agg \
+  --graph_cl_loss --no_disable_graph_cl --graph_cl_lambda 0.05 --graph_fm_drop_rate 0.25 \
+  --graph_ep_perturb_rate 0.1 --graph_gp_topk 3 --graph_cl_tau 0.2 --graph_wp 8 --graph_wf 8 --graph_drop 0.1
 
 echo ""
 echo "Ablation suite finished."

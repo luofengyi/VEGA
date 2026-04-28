@@ -41,6 +41,8 @@ def print_metrics(phase, epoch, start_time, metrics, elapsed_time=False):
             f"clip_loss: {metrics['clip_loss']}, "
             f"clip_kl_loss: {metrics['clip_kl_loss']}"
         )
+    if metrics.get('graph_cl_loss') is not None:
+        print(f"graph_cl_loss: {metrics['graph_cl_loss']}")
     print(
         f"all_acc: {metrics['all_acc']}, all_f1: {metrics['all_f1']}, a_f1: {metrics['a_f1']}, "
         f"v_f1: {metrics['v_f1']}, t_f1: {metrics['t_f1']}"
@@ -102,6 +104,7 @@ def train_or_eval_model(args, model, anchor_dict, loss_function, kl_loss_fn, dat
     a_preds, v_preds, t_preds = [], [], []
     losses, cls_losses, cls_all_cls_kl_losses = [], [], []
     clip_losses, clip_all_clip_kl_losses = [], []
+    graph_cl_losses = []
 
     scaler = torch.amp.GradScaler('cuda', enabled=args.cuda)
     assert (not is_train) or (optimizer is not None)
@@ -127,7 +130,7 @@ def train_or_eval_model(args, model, anchor_dict, loss_function, kl_loss_fn, dat
                 a_cls_temp, v_cls_temp, t_cls_temp,
                 t_clip_logit, a_clip_logit, v_clip_logit, all_clip_logit,
                 a_clip_temp, v_clip_temp, t_clip_temp,
-                *_
+                _, _, _, _, _, graph_cl_loss
             ) = model(anchor_dict, textf, visuf, acouf, umask, qmask, lengths, forward_train_flag)
 
             labels_ = label.view(-1)
@@ -184,6 +187,10 @@ def train_or_eval_model(args, model, anchor_dict, loss_function, kl_loss_fn, dat
                     loss += clip_all_clip_kl_loss * args.clip_all_clip_kl_lambda
                     clip_all_clip_kl_losses.append(clip_all_clip_kl_loss.item())
 
+            if args.use_graph_agg and args.use_pyg_graph_agg and args.graph_cl_loss:
+                loss += graph_cl_loss * args.graph_cl_lambda
+                graph_cl_losses.append(graph_cl_loss.item())
+
             losses.append(loss.item())
 
         labels.append(labels_.data.cpu().numpy())
@@ -217,6 +224,11 @@ def train_or_eval_model(args, model, anchor_dict, loss_function, kl_loss_fn, dat
         epoch_clip_loss = None
         epoch_clip_all_clip_kl_loss = None
 
+    if graph_cl_losses:
+        epoch_graph_cl_loss = round(np.sum(graph_cl_losses) / np.sum(masks), 4)
+    else:
+        epoch_graph_cl_loss = None
+
     all_f1 = round(f1_score(labels[mask], all_preds[mask], average='weighted') * 100, 2)
     all_acc = round(float(precision_score(labels[mask], all_preds[mask], average="weighted", zero_division=0) * 100), 2)
 
@@ -233,6 +245,7 @@ def train_or_eval_model(args, model, anchor_dict, loss_function, kl_loss_fn, dat
         'cls_kl_loss': epoch_cls_all_cls_kl_loss,
         'clip_loss': epoch_clip_loss,
         'clip_kl_loss': epoch_clip_all_clip_kl_loss,
+        'graph_cl_loss': epoch_graph_cl_loss,
         'all_acc': all_acc,
         'all_f1': all_f1,
         'a_f1': a_f1,

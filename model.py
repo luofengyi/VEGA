@@ -3,6 +3,7 @@ from argparse import Namespace
 import torch.nn as nn
 import math
 from functools import partial
+from typing import List
 from vega_utils.common import emotion_labels
 
 
@@ -287,6 +288,11 @@ class SimpleDialogGNN(nn.Module):
 
 import torch
 import torch.nn.functional as F
+try:
+    from torch_geometric.nn import RGCNConv, TransformerConv
+except ImportError:
+    RGCNConv = None
+    TransformerConv = None
 
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
@@ -336,6 +342,171 @@ def get_clip_visual_features_batch(img_list, clip_model, clip_processor, batch_s
             image_features = clip_model.get_image_features(**image_input)
             all_features.append(F.normalize(image_features, dim=-1))
     return torch.cat(all_features, dim=0)
+
+
+class PyGDialogGNN(nn.Module):
+    def __init__(self, hidden_dim, dropout=0.1, num_relations=4):
+        super(PyGDialogGNN, self).__init__()
+        if RGCNConv is None or TransformerConv is None:
+            raise ImportError(
+                "torch_geometric is required for PyGDialogGNN (RGCNConv + TransformerConv). "
+                "Install torch-geometric and its dependencies first."
+            )
+        self.rgcn = RGCNConv(hidden_dim, hidden_dim, num_relations=num_relations)
+        self.transform_conv = TransformerConv(hidden_dim, hidden_dim, heads=1, concat=True)
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.disable_gcl = False
+        self.fm_drop_rate = 0.25
+        self.ep_perturb_rate = 0.10
+        self.gp_topk = 3
+        self.cl_tau = 0.2
+
+    @staticmethod
+    def _build_graph_for_dialog(
+        speaker_ids: torch.Tensor, valid_len: int, offset: int, wp: int, wf: int
+    ):
+        edge_src = []
+        edge_dst = []
+        edge_rel = []
+
+        for i in range(valid_len):
+            left = max(0, i - wp) if wp >= 0 else 0
+            right = min(valid_len - 1, i + wf) if wf >= 0 else (valid_len - 1)
+            for j in range(left, right + 1):
+                if j == i:
+                    continue
+                same_spk = speaker_ids[j].item() == speaker_ids[i].item()
+                is_future = int(j > i)
+                # 0: same/past, 1: same/future, 2: diff/past, 3: diff/future
+                rel_type = (0 if same_spk else 2) + is_future
+                edge_src.append(offset + j)
+                edge_dst.append(offset + i)
+                edge_rel.append(rel_type)
+        return edge_src, edge_dst, edge_rel
+
+    def _build_batch_graph(self, x, qmask, dia_len: List[int], wp: int, wf: int):
+        node_features = []
+        edge_src_all = []
+        edge_dst_all = []
+        edge_rel_all = []
+        node_slices = []
+
+        offset = 0
+        speaker_ids = torch.argmax(qmask, dim=-1)
+        for b, valid_len in enumerate(dia_len):
+            valid_nodes = x[b, :valid_len]
+            node_features.append(valid_nodes)
+            node_slices.append((b, offset, valid_len))
+            src, dst, rel = self._build_graph_for_dialog(
+                speaker_ids[b], valid_len, offset, wp=wp, wf=wf
+            )
+            edge_src_all.extend(src)
+            edge_dst_all.extend(dst)
+            edge_rel_all.extend(rel)
+            offset += valid_len
+
+        all_nodes = torch.cat(node_features, dim=0)
+        if len(edge_src_all) == 0:
+            edge_index = torch.empty((2, 0), dtype=torch.long, device=x.device)
+            edge_type = torch.empty((0,), dtype=torch.long, device=x.device)
+        else:
+            edge_index = torch.tensor([edge_src_all, edge_dst_all], dtype=torch.long, device=x.device)
+            edge_type = torch.tensor(edge_rel_all, dtype=torch.long, device=x.device)
+
+        return all_nodes, edge_index, edge_type, node_slices
+
+    @staticmethod
+    def _scatter_to_padded(updated_nodes, x, node_slices):
+        out = x.clone()
+        for b, offset, valid_len in node_slices:
+            out[b, :valid_len] = updated_nodes[offset:offset + valid_len]
+        return out
+
+    @staticmethod
+    def _random_feature_mask(input_feature, drop_percent):
+        if drop_percent <= 0:
+            return input_feature
+        keep_prob = 1.0 - drop_percent
+        mask = torch.bernoulli(
+            torch.full(input_feature.shape, keep_prob, device=input_feature.device, dtype=input_feature.dtype)
+        )
+        return input_feature * mask
+
+    @staticmethod
+    def _random_edge_pert(edge_index, num_nodes, pert_percent):
+        if pert_percent <= 0 or edge_index.size(1) == 0:
+            return edge_index
+        num_edges = edge_index.size(1)
+        pert_num_edges = max(1, int(num_edges * pert_percent))
+        pert_num_edges = min(pert_num_edges, num_edges)
+        pert_idxs = torch.randperm(num_edges, device=edge_index.device)[:pert_num_edges]
+        perturbed = edge_index.clone()
+        perturbed[1, pert_idxs] = torch.randint(0, num_nodes, (pert_num_edges,), device=edge_index.device)
+        return perturbed
+
+    @staticmethod
+    def _global_proximity_edge(edge_index, node_features, topk=3):
+        if topk <= 0 or node_features.size(0) < 2:
+            return edge_index
+        k = min(topk, node_features.size(0) - 1)
+        z = F.normalize(node_features, p=2, dim=-1)
+        sim = torch.matmul(z, z.t())
+        sim.fill_diagonal_(-1)
+        neighbors = torch.topk(sim, k=k, dim=1).indices
+        src = torch.arange(node_features.size(0), device=node_features.device).unsqueeze(1).repeat(1, k).reshape(-1)
+        dst = neighbors.reshape(-1)
+        gp_edges = torch.stack([src, dst], dim=0)
+        return torch.cat([edge_index, gp_edges], dim=1)
+
+    @staticmethod
+    def _info_nce(z1, z2, tau):
+        z1 = F.normalize(z1, p=2, dim=-1)
+        z2 = F.normalize(z2, p=2, dim=-1)
+        logits = torch.matmul(z1, z2.t()) / tau
+        labels = torch.arange(z1.size(0), device=z1.device)
+        loss_1 = F.cross_entropy(logits, labels)
+        loss_2 = F.cross_entropy(logits.t(), labels)
+        return 0.5 * (loss_1 + loss_2)
+
+    def _contrastive_loss(self, h1, h2, ho):
+        return self._info_nce(ho, h1, self.cl_tau) + self._info_nce(ho, h2, self.cl_tau)
+
+    def _apply_aug(self, node_features, edge_index, aug_type):
+        aug_embedding = node_features
+        aug_edge_index = edge_index
+        if "fm" in aug_type:
+            aug_embedding = self._random_feature_mask(aug_embedding, self.fm_drop_rate)
+        if "ep" in aug_type:
+            aug_edge_index = self._random_edge_pert(aug_edge_index, node_features.size(0), self.ep_perturb_rate)
+        if "gp" in aug_type:
+            aug_edge_index = self._global_proximity_edge(aug_edge_index, aug_embedding, self.gp_topk)
+        return aug_embedding, aug_edge_index
+
+    def forward(self, x, qmask, dia_len, wp=8, wf=8, train_mode=False):
+        all_nodes, edge_index, edge_type, node_slices = self._build_batch_graph(
+            x, qmask, dia_len, wp=wp, wf=wf
+        )
+        if edge_index.size(1) == 0:
+            return x, x.new_tensor(0.0)
+
+        graph_cl_loss = x.new_tensor(0.0)
+        if train_mode and (not self.disable_gcl):
+            aug1_embedding, aug1_edge_index = self._apply_aug(all_nodes, edge_index, "fm+ep")
+            aug2_embedding, aug2_edge_index = self._apply_aug(all_nodes, edge_index, "fm+gp")
+            h1 = self.rgcn(aug1_embedding, aug1_edge_index, edge_type)
+            h2 = self.rgcn(aug2_embedding, aug2_edge_index, edge_type)
+            ho = self.rgcn(all_nodes, edge_index, edge_type)
+            graph_cl_loss = self._contrastive_loss(h1, h2, ho)
+        else:
+            ho = self.rgcn(all_nodes, edge_index, edge_type)
+
+        h = self.transform_conv(ho, edge_index)
+        h = F.leaky_relu(h)
+        h = self.dropout(h)
+
+        out = self._scatter_to_padded(h, x, node_slices)
+        return self.norm(x + self.dropout(out)), graph_cl_loss
 
 
 
@@ -394,10 +565,25 @@ class Transformer_Based_Model(nn.Module):
 
         self.last_gate = Multimodal_GatedFusion(hidden_dim)
         self.use_graph_agg = getattr(args, 'use_graph_agg', False)
+        self.use_pyg_graph_agg = getattr(args, 'use_pyg_graph_agg', True)
         self.graph_wp = getattr(args, 'graph_wp', 8)
         self.graph_wf = getattr(args, 'graph_wf', 8)
+        self.graph_num_relations = getattr(args, 'graph_num_relations', 4)
         if self.use_graph_agg:
-            self.graph_agg = SimpleDialogGNN(hidden_dim, dropout=getattr(args, 'graph_drop', 0.1))
+            graph_drop = getattr(args, 'graph_drop', 0.1)
+            if self.use_pyg_graph_agg:
+                self.graph_agg = PyGDialogGNN(
+                    hidden_dim,
+                    dropout=graph_drop,
+                    num_relations=self.graph_num_relations,
+                )
+                self.graph_agg.disable_gcl = getattr(args, 'disable_graph_cl', False)
+                self.graph_agg.fm_drop_rate = getattr(args, 'graph_fm_drop_rate', 0.25)
+                self.graph_agg.ep_perturb_rate = getattr(args, 'graph_ep_perturb_rate', 0.10)
+                self.graph_agg.gp_topk = getattr(args, 'graph_gp_topk', 3)
+                self.graph_agg.cl_tau = getattr(args, 'graph_cl_tau', 0.2)
+            else:
+                self.graph_agg = SimpleDialogGNN(hidden_dim, dropout=graph_drop)
 
         self.textf_input = nn.Conv1d(text_dim, hidden_dim, kernel_size=1, padding=0, bias=False)
         self.acouf_input = nn.Conv1d(audio_dim, hidden_dim, kernel_size=1, padding=0, bias=False)
@@ -499,14 +685,23 @@ class Transformer_Based_Model(nn.Module):
 
     def _apply_graph_aggregation(self, all_transformer_out, qmask, dia_len):
         if not self.use_graph_agg:
-            return all_transformer_out
+            return all_transformer_out, all_transformer_out.new_tensor(0.0)
+        if self.use_pyg_graph_agg:
+            return self.graph_agg(
+                all_transformer_out,
+                qmask=qmask,
+                dia_len=dia_len,
+                wp=self.graph_wp,
+                wf=self.graph_wf,
+                train_mode=self.training,
+            )
         return self.graph_agg(
             all_transformer_out,
             qmask=qmask,
             dia_len=dia_len,
             wp=self.graph_wp,
             wf=self.graph_wf,
-        )
+        ), all_transformer_out.new_tensor(0.0)
 
     def _get_temperature_values(self):
         a_cls_temp = self.a_cls_temp.exp()
@@ -575,11 +770,11 @@ class Transformer_Based_Model(nn.Module):
         t_transformer_out, a_transformer_out, v_transformer_out, all_transformer_out = self._forward_transformer_branch(
             textf, visuf, acouf, u_mask, spk_embeddings
         )
-        all_transformer_out = self._apply_graph_aggregation(all_transformer_out, qmask, dia_len)
+        all_transformer_out, graph_cl_loss = self._apply_graph_aggregation(all_transformer_out, qmask, dia_len)
         t_logit, a_logit, v_logit, all_logit = self._forward_backbone_logits(
             t_transformer_out, a_transformer_out, v_transformer_out, all_transformer_out
         )
-        return t_logit, a_logit, v_logit, all_logit, all_transformer_out
+        return t_logit, a_logit, v_logit, all_logit, all_transformer_out, graph_cl_loss
 
     def forward(self, anchor_dict, textf, visuf, acouf, u_mask, qmask, dia_len, train):
         anchor_img_dict, anchor_center = None, None
@@ -600,6 +795,7 @@ class Transformer_Based_Model(nn.Module):
         ) = self._get_temperature_values()
 
         all_clip_prob = None
+        graph_cl_loss = textf.new_tensor(0.0)
         if self.args.clip_loss:
             if anchor_img_dict is None or anchor_center is None:
                 raise ValueError("anchor_dict with 'anchor_img_dict' and 'anchor_center' is required for clip_loss.")
@@ -608,7 +804,7 @@ class Transformer_Based_Model(nn.Module):
             t_transformer_out, a_transformer_out, v_transformer_out, all_transformer_out = self._forward_transformer_branch(
                 textf, visuf, acouf, u_mask, spk_embeddings
             )
-            all_transformer_out = self._apply_graph_aggregation(all_transformer_out, qmask, dia_len)
+            all_transformer_out, graph_cl_loss = self._apply_graph_aggregation(all_transformer_out, qmask, dia_len)
             (
                 t_clip_logit, a_clip_logit, v_clip_logit, all_clip_logit, all_clip_prob
             ) = self._forward_vega_logits(
@@ -619,7 +815,7 @@ class Transformer_Based_Model(nn.Module):
                 t_transformer_out, a_transformer_out, v_transformer_out, all_transformer_out
             )
         else:
-            t_logit, a_logit, v_logit, all_logit, all_transformer_out = self.forward_backbone(
+            t_logit, a_logit, v_logit, all_logit, all_transformer_out, graph_cl_loss = self.forward_backbone(
                 textf, visuf, acouf, u_mask, qmask, dia_len
             )
 
@@ -636,5 +832,5 @@ class Transformer_Based_Model(nn.Module):
             a_clip_temp, v_clip_temp, t_clip_temp,
 
             fusion_logit, fusion_prob, average_prob, max_prob,
-            all_transformer_out
+            all_transformer_out, graph_cl_loss
         )

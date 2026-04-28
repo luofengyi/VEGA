@@ -16,3 +16,4 @@ dependencies:
       - pillow==10.4.0
       - pytz==2024.1
       - matplotlib==3.9.2
+      - torch-geometric

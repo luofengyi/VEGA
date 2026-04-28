@@ -71,9 +71,18 @@ def parse_arguments():
     parser.add_argument('--outlayer_num', type=int, default=cfg['outlayer_num'], help='Number of layers in classifier head.')
     parser.add_argument('--outlayer_activation_fn', type=str, default=cfg['outlayer_activation_fn'], help='Activation function in classifier head.')
     add_bool_flag('use_graph_agg', False, 'Enable lightweight dialog graph aggregation on fused utterance states.')
+    add_bool_flag('use_pyg_graph_agg', True, 'Use PyG RGCN graph aggregation (fallback to simple graph when disabled).')
     parser.add_argument('--graph_drop', type=float, default=0.1, help='Dropout used in dialog graph aggregation module.')
     parser.add_argument('--graph_wp', type=int, default=8, help='Past context window for dialog graph aggregation.')
     parser.add_argument('--graph_wf', type=int, default=8, help='Future context window for dialog graph aggregation.')
+    parser.add_argument('--graph_num_relations', type=int, default=4, help='Number of relation types for PyG graph aggregation.')
+    add_bool_flag('graph_cl_loss', True, 'Enable graph contrastive loss when using PyG graph aggregation.')
+    parser.add_argument('--graph_cl_lambda', type=float, default=0.05, help='Weight for graph contrastive loss.')
+    add_bool_flag('disable_graph_cl', False, 'Disable graph contrastive view augmentation inside PyG graph aggregation.')
+    parser.add_argument('--graph_fm_drop_rate', type=float, default=0.25, help='Feature mask ratio for graph contrastive augmentation.')
+    parser.add_argument('--graph_ep_perturb_rate', type=float, default=0.1, help='Edge perturb ratio for graph contrastive augmentation.')
+    parser.add_argument('--graph_gp_topk', type=int, default=3, help='Top-k proximity edges for graph contrastive augmentation.')
+    parser.add_argument('--graph_cl_tau', type=float, default=0.2, help='Temperature for graph contrastive InfoNCE loss.')
 
     # Loss function configurations
     add_bool_flag('clip_loss', cfg['clip_loss'], 'Enable CLIP supervision branch.')
