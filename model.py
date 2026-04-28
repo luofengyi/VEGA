@@ -252,6 +252,39 @@ class Multimodal_GatedFusion(nn.Module):
         return final_rep
 
 
+class SimpleDialogGNN(nn.Module):
+    def __init__(self, hidden_dim, dropout=0.1):
+        super(SimpleDialogGNN, self).__init__()
+        self.msg = nn.Linear(hidden_dim, hidden_dim)
+        self.self_fc = nn.Linear(hidden_dim, hidden_dim)
+        self.out = nn.Linear(hidden_dim, hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(hidden_dim)
+
+    def forward(self, x, qmask, dia_len, wp=8, wf=8):
+        # x: [B, T, H], qmask: [B, T, S]
+        batch_size, _, _ = x.size()
+        speaker_ids = torch.argmax(qmask, dim=-1)
+        out = x.clone()
+
+        for b in range(batch_size):
+            valid_len = dia_len[b]
+            for i in range(valid_len):
+                left = max(0, i - wp) if wp >= 0 else 0
+                right = min(valid_len - 1, i + wf) if wf >= 0 else (valid_len - 1)
+                neighbors = x[b, left:right + 1]
+
+                same_speaker = (speaker_ids[b, left:right + 1] == speaker_ids[b, i]).float().unsqueeze(-1)
+                weights = 0.5 + 0.5 * same_speaker
+                message = (neighbors * weights).mean(dim=0)
+
+                h = self.self_fc(x[b, i]) + self.msg(message)
+                out[b, i] = h
+
+        out = self.norm(x + self.dropout(self.out(F.relu(out))))
+        return out
+
+
 import torch
 import torch.nn.functional as F
 
@@ -360,6 +393,11 @@ class Transformer_Based_Model(nn.Module):
         self.features_reduce_v = nn.Linear(3 * hidden_dim, hidden_dim)
 
         self.last_gate = Multimodal_GatedFusion(hidden_dim)
+        self.use_graph_agg = getattr(args, 'use_graph_agg', False)
+        self.graph_wp = getattr(args, 'graph_wp', 8)
+        self.graph_wf = getattr(args, 'graph_wf', 8)
+        if self.use_graph_agg:
+            self.graph_agg = SimpleDialogGNN(hidden_dim, dropout=getattr(args, 'graph_drop', 0.1))
 
         self.textf_input = nn.Conv1d(text_dim, hidden_dim, kernel_size=1, padding=0, bias=False)
         self.acouf_input = nn.Conv1d(audio_dim, hidden_dim, kernel_size=1, padding=0, bias=False)
@@ -459,6 +497,17 @@ class Transformer_Based_Model(nn.Module):
         all_logit = self.all_output_layer(all_transformer_out)
         return t_logit, a_logit, v_logit, all_logit
 
+    def _apply_graph_aggregation(self, all_transformer_out, qmask, dia_len):
+        if not self.use_graph_agg:
+            return all_transformer_out
+        return self.graph_agg(
+            all_transformer_out,
+            qmask=qmask,
+            dia_len=dia_len,
+            wp=self.graph_wp,
+            wf=self.graph_wf,
+        )
+
     def _get_temperature_values(self):
         a_cls_temp = self.a_cls_temp.exp()
         v_cls_temp = self.v_cls_temp.exp()
@@ -526,6 +575,7 @@ class Transformer_Based_Model(nn.Module):
         t_transformer_out, a_transformer_out, v_transformer_out, all_transformer_out = self._forward_transformer_branch(
             textf, visuf, acouf, u_mask, spk_embeddings
         )
+        all_transformer_out = self._apply_graph_aggregation(all_transformer_out, qmask, dia_len)
         t_logit, a_logit, v_logit, all_logit = self._forward_backbone_logits(
             t_transformer_out, a_transformer_out, v_transformer_out, all_transformer_out
         )
@@ -558,6 +608,7 @@ class Transformer_Based_Model(nn.Module):
             t_transformer_out, a_transformer_out, v_transformer_out, all_transformer_out = self._forward_transformer_branch(
                 textf, visuf, acouf, u_mask, spk_embeddings
             )
+            all_transformer_out = self._apply_graph_aggregation(all_transformer_out, qmask, dia_len)
             (
                 t_clip_logit, a_clip_logit, v_clip_logit, all_clip_logit, all_clip_prob
             ) = self._forward_vega_logits(

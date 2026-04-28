@@ -70,6 +70,10 @@ def parse_arguments():
     parser.add_argument('--outlayer_drop', type=float, default=cfg['outlayer_drop'], help='Classifier head dropout rate.')
     parser.add_argument('--outlayer_num', type=int, default=cfg['outlayer_num'], help='Number of layers in classifier head.')
     parser.add_argument('--outlayer_activation_fn', type=str, default=cfg['outlayer_activation_fn'], help='Activation function in classifier head.')
+    add_bool_flag('use_graph_agg', False, 'Enable lightweight dialog graph aggregation on fused utterance states.')
+    parser.add_argument('--graph_drop', type=float, default=0.1, help='Dropout used in dialog graph aggregation module.')
+    parser.add_argument('--graph_wp', type=int, default=8, help='Past context window for dialog graph aggregation.')
+    parser.add_argument('--graph_wf', type=int, default=8, help='Future context window for dialog graph aggregation.')
 
     # Loss function configurations
     add_bool_flag('clip_loss', cfg['clip_loss'], 'Enable CLIP supervision branch.')
