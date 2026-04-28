@@ -387,6 +387,7 @@ class PyGDialogGNN(nn.Module):
 
     def _build_batch_graph(self, x, qmask, dia_len: List[int], wp: int, wf: int):
         node_features = []
+        node_speaker_ids = []
         edge_src_all = []
         edge_dst_all = []
         edge_rel_all = []
@@ -397,6 +398,7 @@ class PyGDialogGNN(nn.Module):
         for b, valid_len in enumerate(dia_len):
             valid_nodes = x[b, :valid_len]
             node_features.append(valid_nodes)
+            node_speaker_ids.append(speaker_ids[b, :valid_len])
             node_slices.append((b, offset, valid_len))
             src, dst, rel = self._build_graph_for_dialog(
                 speaker_ids[b], valid_len, offset, wp=wp, wf=wf
@@ -407,6 +409,7 @@ class PyGDialogGNN(nn.Module):
             offset += valid_len
 
         all_nodes = torch.cat(node_features, dim=0)
+        all_speaker_ids = torch.cat(node_speaker_ids, dim=0)
         if len(edge_src_all) == 0:
             edge_index = torch.empty((2, 0), dtype=torch.long, device=x.device)
             edge_type = torch.empty((0,), dtype=torch.long, device=x.device)
@@ -414,7 +417,7 @@ class PyGDialogGNN(nn.Module):
             edge_index = torch.tensor([edge_src_all, edge_dst_all], dtype=torch.long, device=x.device)
             edge_type = torch.tensor(edge_rel_all, dtype=torch.long, device=x.device)
 
-        return all_nodes, edge_index, edge_type, node_slices
+        return all_nodes, all_speaker_ids, edge_index, edge_type, node_slices
 
     @staticmethod
     def _scatter_to_padded(updated_nodes, x, node_slices):
@@ -448,7 +451,7 @@ class PyGDialogGNN(nn.Module):
     @staticmethod
     def _global_proximity_edge(edge_index, node_features, topk=3):
         if topk <= 0 or node_features.size(0) < 2:
-            return edge_index
+            return edge_index, 0
         k = min(topk, node_features.size(0) - 1)
         z = F.normalize(node_features, p=2, dim=-1)
         sim = torch.matmul(z, z.t())
@@ -457,7 +460,7 @@ class PyGDialogGNN(nn.Module):
         src = torch.arange(node_features.size(0), device=node_features.device).unsqueeze(1).repeat(1, k).reshape(-1)
         dst = neighbors.reshape(-1)
         gp_edges = torch.stack([src, dst], dim=0)
-        return torch.cat([edge_index, gp_edges], dim=1)
+        return torch.cat([edge_index, gp_edges], dim=1), gp_edges.size(1)
 
     @staticmethod
     def _info_nce(z1, z2, tau):
@@ -472,19 +475,33 @@ class PyGDialogGNN(nn.Module):
     def _contrastive_loss(self, h1, h2, ho):
         return self._info_nce(ho, h1, self.cl_tau) + self._info_nce(ho, h2, self.cl_tau)
 
-    def _apply_aug(self, node_features, edge_index, aug_type):
+    @staticmethod
+    def _build_rel_types_for_edges(edge_index, node_speaker_ids):
+        src = edge_index[0]
+        dst = edge_index[1]
+        same_spk = node_speaker_ids[src] == node_speaker_ids[dst]
+        is_future = src > dst
+        return (same_spk.long() * 0 + (~same_spk).long() * 2) + is_future.long()
+
+    def _apply_aug(self, node_features, node_speaker_ids, edge_index, edge_type, aug_type):
         aug_embedding = node_features
         aug_edge_index = edge_index
+        aug_edge_type = edge_type
         if "fm" in aug_type:
             aug_embedding = self._random_feature_mask(aug_embedding, self.fm_drop_rate)
         if "ep" in aug_type:
             aug_edge_index = self._random_edge_pert(aug_edge_index, node_features.size(0), self.ep_perturb_rate)
         if "gp" in aug_type:
-            aug_edge_index = self._global_proximity_edge(aug_edge_index, aug_embedding, self.gp_topk)
-        return aug_embedding, aug_edge_index
+            aug_edge_index, added_edge_count = self._global_proximity_edge(aug_edge_index, aug_embedding, self.gp_topk)
+            if added_edge_count > 0:
+                # Keep relation tensor aligned with edge tensor and relation semantics.
+                gp_edge_index = aug_edge_index[:, -added_edge_count:]
+                gp_edge_type = self._build_rel_types_for_edges(gp_edge_index, node_speaker_ids).to(aug_edge_type.dtype)
+                aug_edge_type = torch.cat([aug_edge_type, gp_edge_type], dim=0)
+        return aug_embedding, aug_edge_index, aug_edge_type
 
     def forward(self, x, qmask, dia_len, wp=8, wf=8, train_mode=False):
-        all_nodes, edge_index, edge_type, node_slices = self._build_batch_graph(
+        all_nodes, all_speaker_ids, edge_index, edge_type, node_slices = self._build_batch_graph(
             x, qmask, dia_len, wp=wp, wf=wf
         )
         if edge_index.size(1) == 0:
@@ -492,10 +509,14 @@ class PyGDialogGNN(nn.Module):
 
         graph_cl_loss = x.new_tensor(0.0)
         if train_mode and (not self.disable_gcl):
-            aug1_embedding, aug1_edge_index = self._apply_aug(all_nodes, edge_index, "fm+ep")
-            aug2_embedding, aug2_edge_index = self._apply_aug(all_nodes, edge_index, "fm+gp")
-            h1 = self.rgcn(aug1_embedding, aug1_edge_index, edge_type)
-            h2 = self.rgcn(aug2_embedding, aug2_edge_index, edge_type)
+            aug1_embedding, aug1_edge_index, aug1_edge_type = self._apply_aug(
+                all_nodes, all_speaker_ids, edge_index, edge_type, "fm+ep"
+            )
+            aug2_embedding, aug2_edge_index, aug2_edge_type = self._apply_aug(
+                all_nodes, all_speaker_ids, edge_index, edge_type, "fm+gp"
+            )
+            h1 = self.rgcn(aug1_embedding, aug1_edge_index, aug1_edge_type)
+            h2 = self.rgcn(aug2_embedding, aug2_edge_index, aug2_edge_type)
             ho = self.rgcn(all_nodes, edge_index, edge_type)
             graph_cl_loss = self._contrastive_loss(h1, h2, ho)
         else:
